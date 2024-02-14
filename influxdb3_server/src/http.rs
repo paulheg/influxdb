@@ -32,10 +32,6 @@ use trace_http::tower::TraceLayer;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    /// The requested path has no registered handler.
-    #[error("not found")]
-    NoHandler,
-
     /// The request body content is not valid utf8.
     #[error("body content is not valid utf8: {0}")]
     NonUtf8Body(Utf8Error),
@@ -106,8 +102,8 @@ pub enum Error {
     MissingWriteParams,
 
     /// Serde decode error
-    #[error("serde error: {0}")]
-    Serde(#[from] serde_urlencoded::de::Error),
+    #[error("serde urlencoded error: {0}")]
+    SerdeUrl(#[from] serde_urlencoded::de::Error),
 
     /// Arrow error
     #[error("arrow error: {0}")]
@@ -136,6 +132,46 @@ pub enum Error {
 
 impl Error {
     fn response(&self) -> Response<Body> {
+        match self {
+            Self::NonUtf8Body(err) => {}
+            Self::NonUtf8ContentHeader(err) => {}
+            Self::InvalidContentEncoding(err) => {}
+            Self::ClientHangup(err) => {}
+            Self::RequestSizeExceeded(size) => {}
+            Self::InvalidGzip(err) => {}
+            Self::InvalidNamespaceName(err) => {}
+            Self::ParseLineProtocol(err) => {}
+            Self::RequestLimit => {}
+
+            Self::Unauthenticated => {}
+            Self::Forbidden => {}
+            Self::PProfIsNotCompiled => {}
+
+            Self::HeappyIsNotCompiled => {}
+
+            #[cfg(feature = "heappy")]
+            Self::Heappy(heappy::Error) => {}
+
+            Self::ServingHttp(err) => {}
+
+            Self::MissingQueryParams => {}
+
+            Self::MissingWriteParams => {}
+
+            Self::SerdeUrl(err) => {}
+
+            Self::Arrow(err) => {}
+
+            Self::Hyper(err) => {}
+
+            Self::WriteBuffer(err) => {}
+
+            Self::ToStr(err) => {}
+
+            Self::SerdeJson(err) => {}
+            Self::Influxdb3Write(err) => {}
+        }
+
         let body = Body::from(self.to_string());
         Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
