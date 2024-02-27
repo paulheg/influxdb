@@ -381,9 +381,10 @@ jobs:
       - run:
           name: Build test binaries
           command: |
-            export GOOS=<< parameters.os >>
-            export GOARCH=<< parameters.arch >>
             ./scripts/ci/build-tests.sh ./test-bin
+          environment:
+            GOARCH: << parameters.arch >>
+            GOOS:   << parameters.os >>
       - persist_to_workspace:
           root: .
           paths:
