@@ -166,6 +166,10 @@ workflows:
             - test-linux-packages
             - build-packages
             - sign-packages
+      - slack:
+          <<: *release_filter
+          requires:
+            - publish-packages
       - changelog:
           <<: *release_filter
           workflow: release
@@ -471,37 +475,34 @@ jobs:
             - bin
 
   build-packages:
-    machine:
-      image: ubuntu-2204:current
+    docker:
+      - image: quay.io/bpfeifer_influx/ci-packager:f128dcc5310a3b906711330eee75cf37ec9ca9ee
     steps:
       - attach_workspace:
           at: /tmp/workspace
       - checkout
       - run: |
-          export DEBIAN_FRONTEND=noninteractive
-          sudo -E apt-get update
-          sudo -E apt-get install --no-install-recommends --yes \
-            asciidoc        \
-            build-essential \
-            git             \
-            python3         \
-            rpm             \
-            ruby-dev        \
-            xmlto
-
-          sudo gem install fpm
-
-          python3 -m pip install -r .circleci/scripts/package/requirements.txt
-
-          # Unfortunately, this must be executed as root. This is so permission
-          # modifying commands (chown, chmod, etc.) succeed.
-          sudo --preserve-env=CIRCLE_TAG,CIRCLE_SHA1 .circleci/scripts/package/build.py
-      - store_artifacts:
-          path: artifacts/
+          packager .circleci/packages/config.yaml
       - persist_to_workspace:
           root: .
           paths:
             - artifacts
+      - store_artifacts:
+          path: artifacts/
+
+  slack:
+    docker:
+      - image: quay.io/bpfeifer_influx/ci-slack:f128dcc5310a3b906711330eee75cf37ec9ca9ee
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - checkout
+      - run:
+          command: slack
+          environment:
+            SLACK_ARTIFACT_URL:    https://dl.influxdata.com/influxdb/releases
+            SLACK_ARTIFACT_ROOT:   /tmp/workspace/artifacts
+            SLACK_RELEASE_MESSAGE: New InfluxDB OSS Release
 
   sign-packages:
     circleci_ip_ranges: true
