@@ -123,7 +123,7 @@ pub enum Error {
     #[error("write buffer error: {0}")]
     WriteBuffer(#[from] influxdb3_write::write_buffer::Error),
 
-    /// Persister error
+    // /// Persister error
     #[error("persister error: {0}")]
     Persister(#[from] influxdb3_write::persister::Error),
 
