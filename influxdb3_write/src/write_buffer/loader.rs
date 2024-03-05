@@ -7,8 +7,9 @@ use crate::write_buffer::{
     buffer_segment::{load_buffer_from_segment, ClosedBufferSegment, OpenBufferSegment},
     Result,
 };
-use crate::Wal;
 use crate::{PersistedCatalog, PersistedSegment, Persister, SegmentId};
+use crate::{SegmentDuration, SegmentRange, Wal};
+use iox_time::Time;
 use std::sync::Arc;
 
 use super::Error;
@@ -27,6 +28,8 @@ pub struct LoadedState {
 pub async fn load_starting_state<W, P>(
     persister: Arc<P>,
     wal: Option<Arc<W>>,
+    server_load_time: Time,
+    segment_duration: SegmentDuration,
 ) -> Result<LoadedState>
 where
     W: Wal,
@@ -44,6 +47,9 @@ where
         .unwrap_or(SegmentId::new(0));
     let mut open_segment_id = last_persisted_segment_id.next();
     let mut persisting_buffer_segments = Vec::new();
+
+    let current_segment_range =
+        SegmentRange::from_time_and_duration(server_load_time, segment_duration, false);
 
     let open_segment = if let Some(wal) = wal {
         // read any segments that don't show up in the list of persisted segments
@@ -70,6 +76,7 @@ where
 
                 let segment = OpenBufferSegment::new(
                     segment_file.segment_id,
+                    current_segment_range,
                     starting_sequence_number,
                     Box::new(WalSegmentWriterNoopImpl::new(segment_file.segment_id)),
                     Some(buffer),
@@ -89,13 +96,19 @@ where
             }
             Err(e) => return Err(e.into()),
         };
-        let buffered = match segment_reader {
-            Some(reader) => Some(load_buffer_from_segment(&catalog, reader)?),
-            None => None,
+        let (buffered, segment_writer) = match segment_reader {
+            Some(reader) => (
+                Some(load_buffer_from_segment(&catalog, reader)?),
+                wal.open_segment_writer(open_segment_id)?,
+            ),
+            None => (
+                None,
+                wal.new_segment_writer(open_segment_id, current_segment_range)?,
+            ),
         };
-        let segment_writer = wal.open_segment_writer(open_segment_id)?;
         OpenBufferSegment::new(
             open_segment_id,
+            current_segment_range,
             catalog.sequence_number(),
             segment_writer,
             buffered,
@@ -103,6 +116,7 @@ where
     } else {
         OpenBufferSegment::new(
             open_segment_id,
+            current_segment_range,
             catalog.sequence_number(),
             Box::new(WalSegmentWriterNoopImpl::new(open_segment_id)),
             None,
@@ -123,8 +137,12 @@ mod tests {
     use crate::persister::PersisterImpl;
     use crate::test_helpers::lp_to_write_batch;
     use crate::wal::{WalImpl, WalSegmentWriterNoopImpl};
-    use crate::{DatabaseTables, LpWriteOp, ParquetFile, SequenceNumber, TableParquetFiles, WalOp};
+    use crate::{
+        DatabaseTables, LpWriteOp, ParquetFile, SegmentRange, SequenceNumber, TableParquetFiles,
+        WalOp,
+    };
     use arrow_util::assert_batches_eq;
+    use iox_time::Time;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use std::collections::HashMap;
@@ -136,8 +154,13 @@ mod tests {
 
         let segment_id = SegmentId::new(4);
         let segment_writer = Box::new(WalSegmentWriterNoopImpl::new(segment_id));
-        let mut open_segment =
-            OpenBufferSegment::new(segment_id, SequenceNumber::new(0), segment_writer, None);
+        let mut open_segment = OpenBufferSegment::new(
+            segment_id,
+            SegmentRange::test_range(),
+            SequenceNumber::new(0),
+            segment_writer,
+            None,
+        );
 
         let catalog = Catalog::new();
 
@@ -161,9 +184,14 @@ mod tests {
             .await
             .unwrap();
 
-        let loaded_state = load_starting_state(persister, None::<Arc<crate::wal::WalImpl>>)
-            .await
-            .unwrap();
+        let loaded_state = load_starting_state(
+            persister,
+            None::<Arc<crate::wal::WalImpl>>,
+            Time::from_timestamp_nanos(0),
+            SegmentDuration::FiveMinutes,
+        )
+        .await
+        .unwrap();
         let expected_catalog = catalog.clone_inner();
         let loaded_catalog = loaded_state.catalog.clone_inner();
 
@@ -207,9 +235,14 @@ mod tests {
             catalog,
             mut open_segment,
             ..
-        } = load_starting_state(Arc::clone(&persister), Some(Arc::clone(&wal)))
-            .await
-            .unwrap();
+        } = load_starting_state(
+            Arc::clone(&persister),
+            Some(Arc::clone(&wal)),
+            Time::from_timestamp_nanos(0),
+            SegmentDuration::FiveMinutes,
+        )
+        .await
+        .unwrap();
 
         let lp = "cpu,tag1=cupcakes bar=1 10\nmem,tag2=turtles bar=3 15\nmem,tag2=snakes bar=2 20";
 
@@ -224,7 +257,14 @@ mod tests {
         open_segment.write_batch(vec![wal_op]).unwrap();
         open_segment.buffer_writes(write_batch).unwrap();
 
-        let loaded_state = load_starting_state(persister, Some(wal)).await.unwrap();
+        let loaded_state = load_starting_state(
+            persister,
+            Some(wal),
+            Time::from_timestamp_nanos(0),
+            SegmentDuration::FiveMinutes,
+        )
+        .await
+        .unwrap();
 
         assert!(loaded_state.persisting_buffer_segments.is_empty());
         assert!(loaded_state.persisted_segments.is_empty());
@@ -236,9 +276,6 @@ mod tests {
         let cpu_table = db.get_table("cpu").unwrap();
         let cpu_data = open_segment
             .table_buffer(db_name, "cpu")
-            .unwrap()
-            .partition_buffers
-            .get("1970-01-01")
             .unwrap()
             .rows_to_record_batch(&cpu_table.schema, cpu_table.columns());
         let expected = vec![
@@ -253,9 +290,6 @@ mod tests {
         let mem_table = db.get_table("mem").unwrap();
         let mem_data = open_segment
             .table_buffer(db_name, "mem")
-            .unwrap()
-            .partition_buffers
-            .get("1970-01-01")
             .unwrap()
             .rows_to_record_batch(&mem_table.schema, mem_table.columns());
         let expected = vec![
@@ -281,9 +315,14 @@ mod tests {
             catalog,
             mut open_segment,
             ..
-        } = load_starting_state(Arc::clone(&persister), Some(Arc::clone(&wal)))
-            .await
-            .unwrap();
+        } = load_starting_state(
+            Arc::clone(&persister),
+            Some(Arc::clone(&wal)),
+            Time::from_timestamp_nanos(0),
+            SegmentDuration::FiveMinutes,
+        )
+        .await
+        .unwrap();
 
         let lp = "cpu,tag1=cupcakes bar=1 10\nmem,tag2=turtles bar=3 15\nmem,tag2=snakes bar=2 20";
 
@@ -309,8 +348,10 @@ mod tests {
 
         let mut open_segment = OpenBufferSegment::new(
             next_segment_id,
+            SegmentRange::test_range(),
             catalog.sequence_number(),
-            wal.open_segment_writer(next_segment_id).unwrap(),
+            wal.new_segment_writer(next_segment_id, SegmentRange::test_range())
+                .unwrap(),
             None,
         );
 
@@ -327,14 +368,21 @@ mod tests {
         open_segment.write_batch(vec![wal_op]).unwrap();
         open_segment.buffer_writes(write_batch).unwrap();
 
-        let loaded_state = load_starting_state(persister, Some(wal)).await.unwrap();
+        let loaded_state = load_starting_state(
+            persister,
+            Some(wal),
+            Time::from_timestamp_nanos(0),
+            SegmentDuration::FiveMinutes,
+        )
+        .await
+        .unwrap();
 
         assert!(loaded_state.persisting_buffer_segments.is_empty());
         assert_eq!(
             loaded_state.persisted_segments[0],
             PersistedSegment {
                 segment_id,
-                segment_wal_size_bytes: 201,
+                segment_wal_size_bytes: 227,
                 segment_parquet_size_bytes: 3398,
                 segment_row_count: 3,
                 segment_min_time: 10,
@@ -348,7 +396,7 @@ mod tests {
                                 TableParquetFiles {
                                     table_name: "cpu".to_string(),
                                     parquet_files: vec![ParquetFile {
-                                        path: "dbs/db1/cpu/1970-01-01/4294967294.parquet"
+                                        path: "dbs/db1/cpu/1970-01-01T00-00/4294967294.parquet"
                                             .to_string(),
                                         size_bytes: 1690,
                                         row_count: 1,
@@ -363,7 +411,7 @@ mod tests {
                                 TableParquetFiles {
                                     table_name: "mem".to_string(),
                                     parquet_files: vec![ParquetFile {
-                                        path: "dbs/db1/mem/1970-01-01/4294967294.parquet"
+                                        path: "dbs/db1/mem/1970-01-01T00-00/4294967294.parquet"
                                             .to_string(),
                                         size_bytes: 1708,
                                         row_count: 2,
@@ -388,9 +436,6 @@ mod tests {
         let cpu_data = open_segment
             .table_buffer(db_name, "cpu")
             .unwrap()
-            .partition_buffers
-            .get("1970-01-01")
-            .unwrap()
             .rows_to_record_batch(&cpu_table.schema, cpu_table.columns());
         let expected = vec![
             "+-----+----------+--------------------------------+",
@@ -404,9 +449,6 @@ mod tests {
         let foo_table = db.get_table("foo").unwrap();
         let foo_data = open_segment
             .table_buffer(db_name, "foo")
-            .unwrap()
-            .partition_buffers
-            .get("1970-01-01")
             .unwrap()
             .rows_to_record_batch(&foo_table.schema, foo_table.columns());
         let expected = vec![
@@ -431,9 +473,14 @@ mod tests {
             catalog,
             mut open_segment,
             ..
-        } = load_starting_state(Arc::clone(&persister), Some(Arc::clone(&wal)))
-            .await
-            .unwrap();
+        } = load_starting_state(
+            Arc::clone(&persister),
+            Some(Arc::clone(&wal)),
+            Time::from_timestamp_nanos(0),
+            SegmentDuration::FiveMinutes,
+        )
+        .await
+        .unwrap();
 
         let lp = "cpu,tag1=cupcakes bar=1 10\nmem,tag2=turtles bar=3 15\nmem,tag2=snakes bar=2 20";
 
@@ -454,8 +501,10 @@ mod tests {
 
         let mut open_segment = OpenBufferSegment::new(
             next_segment_id,
+            SegmentRange::test_range(),
             catalog.sequence_number(),
-            wal.open_segment_writer(next_segment_id).unwrap(),
+            wal.new_segment_writer(next_segment_id, SegmentRange::test_range())
+                .unwrap(),
             None,
         );
 
@@ -472,7 +521,14 @@ mod tests {
         open_segment.write_batch(vec![wal_op]).unwrap();
         open_segment.buffer_writes(write_batch).unwrap();
 
-        let loaded_state = load_starting_state(persister, Some(wal)).await.unwrap();
+        let loaded_state = load_starting_state(
+            persister,
+            Some(wal),
+            Time::from_timestamp_nanos(0),
+            SegmentDuration::FiveMinutes,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(loaded_state.persisting_buffer_segments.len(), 1);
         let loaded_closed_segment = &loaded_state.persisting_buffer_segments[0];
@@ -500,9 +556,6 @@ mod tests {
         let cpu_data = open_segment
             .table_buffer(db_name, "cpu")
             .unwrap()
-            .partition_buffers
-            .get("1970-01-01")
-            .unwrap()
             .rows_to_record_batch(&cpu_table.schema, cpu_table.columns());
         let expected = vec![
             "+-----+--------+--------------------------------+",
@@ -516,9 +569,6 @@ mod tests {
         let foo_table = db.get_table("foo").unwrap();
         let foo_data = open_segment
             .table_buffer(db_name, "foo")
-            .unwrap()
-            .partition_buffers
-            .get("1970-01-01")
             .unwrap()
             .rows_to_record_batch(&foo_table.schema, foo_table.columns());
         let expected = vec![

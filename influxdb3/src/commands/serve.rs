@@ -23,10 +23,12 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use iox_time::SystemProvider;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use trace_exporters::TracingConfig;
 use trogging::cli::LoggingConfig;
+use influxdb3_write::SegmentDuration;
 
 /// The default name of the influxdb_iox data directory
 #[allow(dead_code)]
@@ -245,8 +247,8 @@ pub async fn command(config: Config) -> Result<()> {
         .wal_directory
         .map(|dir| WalImpl::new(dir).map(Arc::new))
         .transpose()?;
-    // TODO: the next segment ID should be loaded from the persister
-    let write_buffer = Arc::new(WriteBufferImpl::new(Arc::new(persister), wal).await?);
+    let time_provider = Arc::new(SystemProvider::new());
+    let write_buffer = Arc::new(WriteBufferImpl::new(Arc::new(persister), wal, time_provider, SegmentDuration::FiveMinutes).await?);
     let query_executor = QueryExecutorImpl::new(
         write_buffer.catalog(),
         Arc::clone(&write_buffer),
