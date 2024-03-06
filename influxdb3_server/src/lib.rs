@@ -244,7 +244,9 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicU16, Ordering};
     use std::sync::Arc;
+    use iox_time::SystemProvider;
     use tokio_util::sync::CancellationToken;
+    use influxdb3_write::SegmentDuration;
 
     static NEXT_PORT: AtomicU16 = AtomicU16::new(8090);
 
@@ -276,11 +278,14 @@ mod tests {
             mem_pool_size: usize::MAX,
         }));
         let persister = PersisterImpl::new(Arc::clone(&object_store));
+        let time_provider = Arc::new(SystemProvider::new());
 
         let write_buffer = Arc::new(
             influxdb3_write::write_buffer::WriteBufferImpl::new(
                 Arc::new(persister),
                 None::<Arc<influxdb3_write::wal::WalImpl>>,
+                time_provider,
+                SegmentDuration::FiveMinutes,
             )
             .await
             .unwrap(),
@@ -415,11 +420,14 @@ mod tests {
             mem_pool_size: usize::MAX,
         }));
         let persister = Arc::new(PersisterImpl::new(Arc::clone(&object_store)));
+        let time_provider = Arc::new(SystemProvider::new());
 
         let write_buffer = Arc::new(
             influxdb3_write::write_buffer::WriteBufferImpl::new(
                 Arc::clone(&persister),
                 None::<Arc<influxdb3_write::wal::WalImpl>>,
+                time_provider,
+                SegmentDuration::FiveMinutes,
             )
             .await
             .unwrap(),
@@ -589,11 +597,14 @@ mod tests {
             mem_pool_size: usize::MAX,
         }));
         let persister = Arc::new(PersisterImpl::new(Arc::clone(&object_store)));
+        let time_provider = Arc::new(SystemProvider::new());
 
         let write_buffer = Arc::new(
             influxdb3_write::write_buffer::WriteBufferImpl::new(
                 Arc::clone(&persister),
                 None::<Arc<influxdb3_write::wal::WalImpl>>,
+                time_provider,
+                SegmentDuration::FiveMinutes,
             )
             .await
             .unwrap(),
